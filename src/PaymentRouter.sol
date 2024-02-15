@@ -9,8 +9,9 @@ import { SafeTransferLib } from "solmate/utils/SafeTransferLib.sol";
  */
 contract PaymentRouter {
   fallback() external payable {
-    if (msg.data.length == 0) {
-      SafeTransferLib.safeTransferETH(tx.origin, msg.value);
+    if (msg.data.length == 32) {
+      uint256 value = abi.decode(msg.data, (uint256));
+      SafeTransferLib.safeTransferETH(tx.origin, value);
     } else {
       (address token, uint256 amount) = abi.decode(msg.data, (address, uint256));
       SafeTransferLib.safeTransfer(ERC20(token), tx.origin, amount);

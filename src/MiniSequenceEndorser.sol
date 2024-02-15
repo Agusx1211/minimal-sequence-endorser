@@ -114,13 +114,13 @@ contract MiniSequenceRouter is Endorser, Owned {
     ExecuteCall memory call = _decodeExecuteCall(_data);
 
     // This verifies that the first transaction is the payment to the bundler
-    _controlFeeTransaction(dc, ec, call, _gasLimit, _maxFeePerGas, _feeToken);
+    uint256 usedEth = _controlFeeTransaction(dc, ec, call, _gasLimit, _maxFeePerGas, _feeToken);
 
     // We need to verify that all transactions are safe (revertOnError=false,delegateCall=false)
     // we also need to verify that the wallet isn't transfering more funds than what it has
     // or else the top level call will revert.
     // we can use this oportunity to pull the total maximum gasLimit that they may use
-    uint256 txsGasLimit = _controlTransactions(dc, call, ec);
+    uint256 txsGasLimit = _controlTransactions(dc, call, ec, usedEth);
 
     // We need to validate the implementation, or else we can't guarantee
     // that the wallet will behave as we expect
@@ -228,9 +228,16 @@ contract MiniSequenceRouter is Endorser, Owned {
   function _controlTransactions(
     LibEndorser.DependencyCarrier memory _dc,
     ExecuteCall memory _call,
-    EntrypointControl memory _ec
+    EntrypointControl memory _ec,
+    uint256 usedEth
   ) internal view returns (uint256 gasLimit) {
     uint256 balance = _ec.wallet.balance;
+
+    if (usedEth > balance) {
+      revert("Not enough balance for eth fee: ".concat(usedEth.toString()).concat(" > ").concat(balance.toString()));
+    }
+
+    balance -= usedEth;
 
     unchecked {
       for (uint256 i = 0; i < _call.txs.length; i++) {
@@ -267,7 +274,7 @@ contract MiniSequenceRouter is Endorser, Owned {
     uint256 _gasLimit,
     uint256 _maxFeePerGas,
     address _feeToken
-  ) internal view {
+  ) internal view returns (uint256 ethUsed) {
     // The first transaction should go to the payment router
     // we need to ask for the first, because the other transactions
     // may spend the funds
@@ -283,27 +290,27 @@ contract MiniSequenceRouter is Endorser, Owned {
       revert("Payment router must revert on error");
     }
 
+    if (_call.txs[0].value != 0) {
+      revert("Payment router call with value");
+    }
+
+    uint256 feeAmount = _maxFeePerGas * _gasLimit;
+
     if (_feeToken == address(0)) {
-      // Enough balance will be checked later
-      // since we can't allow the wallet to send more than what
-      // it has to *any* address anyway
-      if (_call.txs[0].value < _maxFeePerGas * _gasLimit) {
-        revert("Not enough ether for the fee");
+      if (_call.txs[0].data.length != 32) {
+        revert("Payment router eth call with wrong data length");
       }
 
-      if (_call.txs[0].data.length != 0) {
-        revert("Payment router call with data");
+      ethUsed = abi.decode(_call.txs[0].data, (uint256));
+      if (ethUsed < feeAmount) {
+        revert("Not enough ether for the fee: ".concat(ethUsed.toString()).concat(" < ").concat(feeAmount.toString()));
       }
 
       // This transaction uses balance
       _dc.addBalanceDependency(_ec.wallet);
     } else {
-      if (_call.txs[0].value != 0) {
-        revert("Payment router call with value");
-      }
-
       if (_call.txs[0].data.length != 64) {
-        revert("Payment router call with wrong data length");
+        revert("Payment router erc20 call with wrong data length");
       }
 
       (address token, uint256 amount) = abi.decode(_call.txs[0].data, (address, uint256));
@@ -311,8 +318,8 @@ contract MiniSequenceRouter is Endorser, Owned {
         revert("Payment router call with wrong token");
       }
 
-      if (amount < _maxFeePerGas * _gasLimit) {
-        revert("Not enough tokens for the fee");
+      if (amount < feeAmount) {
+        revert("Not enough tokens for the fee: ".concat(amount.toString()).concat(" < ").concat(feeAmount.toString()));
       }
 
       // The token must be supported, we validate this using the mapping mapper
