@@ -1,13 +1,15 @@
 pragma solidity ^0.8.0;
 
 
-library LibBytes {
+library LibBytes2 {
+  using LibBytes2 for *;
+
   function cmp(bytes memory _a, bytes memory _b) internal pure returns (bool) {
     return keccak256(_a) == keccak256(_b);
   }
 
   function cmp(bytes memory _a, bytes4 _b) internal pure returns (bool) {
-    return LibBytes.cmp(_a, abi.encodePacked(_b));
+    return _a.cmp(abi.encodePacked(_b));
   }
 
   function toAddress(bytes memory _bytes) internal pure returns (address) {

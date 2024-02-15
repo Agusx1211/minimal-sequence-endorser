@@ -1,12 +1,12 @@
 pragma solidity ^0.8.0;
 
-import "./LibBytes.sol";
+import "./LibBytes2.sol";
 import "./LibSlices.sol";
 
 
 library LibSequenceSig {
   using LibSlices for *;
-  using LibBytes for *;
+  using LibBytes2 for *;
 
   /// @dev ModuleAuth
   bytes1 private constant _LEGACY_TYPE      = 0x00;

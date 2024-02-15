@@ -3,30 +3,33 @@ pragma solidity ^0.8.0;
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { Owned } from "solmate/auth/Owned.sol";
 import { Endorser } from "./interfaces/Endorser.sol";
+import { LibSequenceSig } from "./utils/LibSequenceSig.sol";
+import { NoExecuteModule } from "./NoExecuteModule.sol";
 
 import "wallet-contracts/contracts/modules/commons/interfaces/IModuleCalls.sol";
 import "wallet-contracts/contracts/modules/commons/submodules/nonce/SubModuleNonce.sol";
+import "wallet-contracts/contracts/modules/commons/ModuleAuthUpgradable.sol";
 import "wallet-contracts/contracts/modules/commons/ModuleNonce.sol";
 import "wallet-contracts/contracts/Factory.sol";
 
 import "./utils/LibString2.sol";
-import "./utils/LibBytes.sol";
 import "./utils/LibEndorser.sol";
-import "./utils/LibSequenceSig.sol";
-
-import "./Constants.sol";
+import "./utils/LibBytes2.sol";
 
 // This is a simple Sequence transaction endorser
 // that if the transaction pays THE FULL fee at the end
 // of the transaction. It does not account for any possible
 // refunding to the wallet.
-contract MiniSequenceRouter is Endorser, Owned {
+contract MiniSequenceEndorser is Endorser, Owned {
   using LibString2 for *;
-  using LibBytes for *;
+  using LibBytes2 for *;
   using LibEndorser for *;
 
   //                       NONCE_KEY = keccak256("org.arcadeum.module.calls.nonce");
   bytes32 private constant NONCE_KEY = bytes32(0x8d0bf1fd623d628c741362c1289948e57b3e2905218c676d3e69abee36d6ae2e);
+  //                        IMAGE_HASH_KEY = keccak256("org.arcadeum.module.auth.upgradable.image.hash");
+  bytes32 internal constant IMAGE_HASH_KEY = bytes32(0xea7157fa25e3aa17d0ae2d5280fa4e24d421c61842aa85e45194e1145aa72bf8);
+  bytes private constant SEQUENCE_PROXY_CODE = hex"363d3d373d3d3d363d30545af43d82803e903d91601857fd5bf3";
 
   mapping(address => LibEndorser.MappingMapper) public erc20BalanceMappers;
 
@@ -36,9 +39,13 @@ contract MiniSequenceRouter is Endorser, Owned {
   mapping(address => bool) public isTrustedPaymentRouter;
 
   address immutable public sequenceFactory;
+  address immutable public noExecuteModule;
+  address payable immutable public noopWallet;
 
   constructor(address _owner, address _sequenceFactory) Owned(_owner) {
     sequenceFactory = _sequenceFactory;
+    noExecuteModule = address(new NoExecuteModule());
+    noopWallet = payable(Factory(_sequenceFactory).deploy(noExecuteModule, bytes32(0)));
   }
 
   struct ExecuteCall {
@@ -48,6 +55,7 @@ contract MiniSequenceRouter is Endorser, Owned {
   }
 
   struct EntrypointControl {
+    bool isCreate;
     address wallet;
     bytes data;
     address implementation;
@@ -133,13 +141,17 @@ contract MiniSequenceRouter is Endorser, Owned {
     // or else they could invalidate the transaction, and thus make the endorser fail
     _controlSignature(call);
 
+    // The imageHash will be validated during the simulation, but we need to have it
+    // available for it. We also add it as a dependency
+    _controlImagehash(dc, ec);
+
     // Now there are only two things left to do:
     // - Validate that the signature is correct
     // - Measure the gas cost of the signature validation (outside the list of txs)
     // Because all the other variables have been resolved, we can now just simulate the
     // operation. If the operation succeeds we can measure the gas, and if the gasLimit is
     // enough, then we know that the operation is ready.
-    txsGasLimit += _simulateOperation(_entrypoint, _data);
+    txsGasLimit += _simulateOperation(ec, _entrypoint, _data);
 
     if (txsGasLimit > _gasLimit) {
       revert("Gas limit exceeded: ".concat(txsGasLimit.toString()).concat(" > ").concat(_gasLimit.toString()));
@@ -153,15 +165,57 @@ contract MiniSequenceRouter is Endorser, Owned {
   }
 
   function _simulateOperation(
+    EntrypointControl memory _ec,
     address _entrypoint,
     bytes calldata _data
   ) internal returns (uint256 gasUsed) {
-    uint256 prevGas = gasleft();
-    (bool ok,) = _entrypoint.call(_data);
-    gasUsed = prevGas - gasleft();
+    unchecked {
+      // We need to execute the operation and measure the gas used
+      // this will give us a picture of the cost of the non-call parts
+      // of the operation. We use a "mirror" wallet that does not perform the calls
+      // or else we would end up counting all the gas used by the calls twice.
+      NoExecuteModule(noopWallet).setImageHash(_ec.imageHash);      
 
-    if (!ok) {
-      revert("Operation simulation failed");
+      bool ok;
+      if (_ec.isCreate) {
+        // This is a bit more complicated, since we should also measure the overhead
+        // introduced by the GuestModule call. But we can simulate it too, we only need
+        // to reemplace the second call with a call to our noopWallet
+        (IModuleCalls.Transaction[] memory txs,,) = abi.decode(_data.slice(4), (IModuleCalls.Transaction[], uint256, bytes));
+        txs[1].target = noopWallet;
+        bytes memory calldata2 = abi.encodeWithSelector(IModuleCalls.execute.selector, txs, 0, bytes(""));
+
+        uint256 prevGas = gasleft();
+        (ok,) = _entrypoint.call(calldata2);
+        gasUsed = prevGas - gasleft();
+      } else {
+        uint256 prevGas = gasleft();
+        (ok,) = noopWallet.call(_data);
+        gasUsed = prevGas - gasleft();
+      }
+
+      if (!ok) {
+        revert("Operation simulation failed");
+      }
+    }
+  }
+
+  function _controlImagehash(
+    LibEndorser.DependencyCarrier memory _dc,
+    EntrypointControl memory _ec
+  ) internal view {
+    // Either the wallet is new, and we have the imageHash
+    // or we need to fetch it from the wallet, in both cases
+    // we make the imageHash a dependency, as other transaction
+    // (on a different nonce space) may change it
+    _dc.addSlotDependency(_ec.wallet, IMAGE_HASH_KEY);
+
+    if (!_ec.isCreate) {
+      _ec.imageHash = ModuleAuthUpgradable(_ec.wallet).imageHash();
+    }
+
+    if (_ec.imageHash == bytes32(0)) {
+      revert("Invalid imageHash: 0x0");
     }
   }
 
@@ -401,6 +455,10 @@ contract MiniSequenceRouter is Endorser, Owned {
       revert("Guest module call with more than 2 transactions: ".concat(call.txs.length.toString()));
     }
 
+    if (call.txs[0].value != 0) {
+      revert("Guest module call with value: ".concat(call.txs[0].value.toString()));
+    }
+
     // The first transaction must be the Sequence factory
     if (call.txs[0].target != sequenceFactory) {
       revert("Guest module call with wrong factory: ".concat(call.txs[0].target.toString()));
@@ -419,5 +477,6 @@ contract MiniSequenceRouter is Endorser, Owned {
     // it contains the real calldata and the real target
     res.wallet = call.txs[1].target;
     res.data = call.txs[1].data;
+    res.isCreate = true;
   }
 }
