@@ -1,2 +1,416 @@
 pragma solidity ^0.8.0;
 
+import { ERC20 } from "solmate/tokens/ERC20.sol";
+import { Owned } from "solmate/auth/Owned.sol";
+import { Endorser } from "./interfaces/Endorser.sol";
+
+import "wallet-contracts/contracts/modules/commons/interfaces/IModuleCalls.sol";
+import "wallet-contracts/contracts/modules/commons/submodules/nonce/SubModuleNonce.sol";
+import "wallet-contracts/contracts/modules/commons/ModuleNonce.sol";
+import "wallet-contracts/contracts/Factory.sol";
+
+import "./utils/LibString2.sol";
+import "./utils/LibBytes.sol";
+import "./utils/LibEndorser.sol";
+import "./utils/LibSequenceSig.sol";
+
+import "./Constants.sol";
+
+// This is a simple Sequence transaction endorser
+// that if the transaction pays THE FULL fee at the end
+// of the transaction. It does not account for any possible
+// refunding to the wallet.
+contract MiniSequenceRouter is Endorser, Owned {
+  using LibString2 for *;
+  using LibBytes for *;
+  using LibEndorser for *;
+
+  //                       NONCE_KEY = keccak256("org.arcadeum.module.calls.nonce");
+  bytes32 private constant NONCE_KEY = bytes32(0x8d0bf1fd623d628c741362c1289948e57b3e2905218c676d3e69abee36d6ae2e);
+
+  mapping(address => LibEndorser.MappingMapper) public erc20BalanceMappers;
+
+  mapping(address => bool) public isKnownImplementation;
+  mapping(address => bool) public isGuestModule;
+  mapping(address => bool) public isTrustedNestedSigner;
+  mapping(address => bool) public isTrustedPaymentRouter;
+
+  address immutable public sequenceFactory;
+
+  constructor(address _owner, address _sequenceFactory) Owned(_owner) {
+    sequenceFactory = _sequenceFactory;
+  }
+
+  struct ExecuteCall {
+    IModuleCalls.Transaction[] txs;
+    uint256 nonce;
+    bytes signature;
+  }
+
+  struct EntrypointControl {
+    address wallet;
+    bytes data;
+    address implementation;
+    bytes32 imageHash;
+  }
+
+  function setKnownImplementations(address[] calldata _addrs, bool _isKnown) external onlyOwner {
+    unchecked {
+      for (uint256 i = 0; i < _addrs.length; i++) {
+        isKnownImplementation[_addrs[i]] = _isKnown;
+      }
+    }
+  }
+
+  function setGuestModules(address[] calldata _addrs, bool _isGuest) external onlyOwner {
+    unchecked {
+      for (uint256 i = 0; i < _addrs.length; i++) {
+        isGuestModule[_addrs[i]] = _isGuest;
+      }
+    }
+  }
+
+  function setTrustedNestedSigners(address[] calldata _addrs, bool _isTrusted) external onlyOwner {
+    unchecked {
+      for (uint256 i = 0; i < _addrs.length; i++) {
+        isTrustedNestedSigner[_addrs[i]] = _isTrusted;
+      }
+    }
+  }
+
+  function setTrustedPaymentRouters(address[] calldata _addrs, bool _isTrusted) external onlyOwner {
+    unchecked {
+      for (uint256 i = 0; i < _addrs.length; i++) {
+        isTrustedPaymentRouter[_addrs[i]] = _isTrusted;
+      }
+    }
+  }
+
+  function isOperationReady(
+    address _entrypoint,
+    bytes calldata _data,
+    bytes calldata _endorserCallData,
+    uint256 _gasLimit,
+    uint256 _maxFeePerGas,
+    uint256,
+    address _feeToken,
+    uint256,
+    uint256
+  ) external returns (
+    bool,
+    BlockDependency memory,
+    Dependency[] memory
+  ) {
+    // Create a new dependency carrier
+    // this will be passed around to any function that may have
+    // a dependency to add
+    LibEndorser.DependencyCarrier memory dc;
+
+    // Check if the entrypoint is a Sequence
+    // wallet or a guest module, and fetch the meaningful data
+    EntrypointControl memory ec = _controlEntrypoint(_entrypoint, _data);
+
+    // We will use this call data a few times
+    ExecuteCall memory call = _decodeExecuteCall(_data);
+
+    // This verifies that the first transaction is the payment to the bundler
+    _controlFeeTransaction(dc, ec, call, _gasLimit, _maxFeePerGas, _feeToken);
+
+    // We need to verify that all transactions are safe (revertOnError=false,delegateCall=false)
+    // we also need to verify that the wallet isn't transfering more funds than what it has
+    // or else the top level call will revert.
+    // we can use this oportunity to pull the total maximum gasLimit that they may use
+    uint256 txsGasLimit = _controlTransactions(dc, call, ec);
+
+    // We need to validate the implementation, or else we can't guarantee
+    // that the wallet will behave as we expect
+    _controlImplementation(dc, _endorserCallData, ec);
+
+    // The nonce determines that the transaction has not been replayed yet
+    _controlNonce(dc, call, ec);
+
+    // Nested signatures are stateful! We need to validate them
+    // or else they could invalidate the transaction, and thus make the endorser fail
+    _controlSignature(call);
+
+    // Now there are only two things left to do:
+    // - Validate that the signature is correct
+    // - Measure the gas cost of the signature validation (outside the list of txs)
+    // Because all the other variables have been resolved, we can now just simulate the
+    // operation. If the operation succeeds we can measure the gas, and if the gasLimit is
+    // enough, then we know that the operation is ready.
+    txsGasLimit += _simulateOperation(_entrypoint, _data);
+
+    if (txsGasLimit > _gasLimit) {
+      revert("Gas limit exceeded: ".concat(txsGasLimit.toString()).concat(" > ").concat(_gasLimit.toString()));
+    }
+
+    return (
+      true,
+      dc.blockDependency,
+      dc.dependencies
+    );
+  }
+
+  function _simulateOperation(
+    address _entrypoint,
+    bytes calldata _data
+  ) internal returns (uint256 gasUsed) {
+    uint256 prevGas = gasleft();
+    (bool ok,) = _entrypoint.call(_data);
+    gasUsed = prevGas - gasleft();
+
+    if (!ok) {
+      revert("Operation simulation failed");
+    }
+  }
+
+  function _controlSignature(
+    ExecuteCall memory _call
+  ) internal view {
+    address[] memory eip1271Signers = LibSequenceSig.readEIP1271FromSig(_call.signature);
+    for (uint256 i = 0; i < eip1271Signers.length; i++) {
+      // TODO: If we knew the internal structure of these wallets
+      // we can instead add them (with the proper dependencies)
+      // We can't just mark the signer as a dependency, because
+      // the signer MAY also have nested signers
+      if (!isTrustedNestedSigner[eip1271Signers[i]]) {
+        revert("Untrusted nested signer: ".concat(eip1271Signers[i].toString()));
+      }
+    }
+  }
+
+  function _controlNonce(
+    LibEndorser.DependencyCarrier memory _dc,
+    ExecuteCall memory _call,
+    EntrypointControl memory _ec
+  ) internal view {
+    (uint256 space, uint256 nonce) = SubModuleNonce.decodeNonce(_call.nonce);
+
+    uint256 currentNonce = ModuleNonce(_ec.wallet).readNonce(space);
+    if (nonce != currentNonce) {
+      revert("Invalid nonce: ".concat(nonce.toString()).concat(" != ").concat(currentNonce.toString()));
+    }
+
+    // This transaction depends on this specific nonce space
+    bytes32 nonceSlot = keccak256(abi.encode(NONCE_KEY, space));
+    _dc.addSlotDependency(_ec.wallet, nonceSlot);
+  }
+
+  function _controlImplementation(
+    LibEndorser.DependencyCarrier memory _dc,
+    bytes calldata _endorserCalldata,
+    EntrypointControl memory _ec
+  ) internal view {
+    // If the wallet is new we have the implementation from the wallet creation
+    // we can just check if it is a good one
+    if (_ec.implementation != address(0)) {
+      if (!isKnownImplementation[_ec.implementation]) {
+        revert("Unknown implementation: ".concat(_ec.implementation.toString()));
+      }
+
+      // The wallet is not deployed, this means that the wallet code itself
+      // becomes a dependency, as after deployed this path no longer works.
+      _dc.addCodeDependency(_ec.wallet);
+    } else {
+      // Here it becomes a bit more tricky, since we can't directly know the implementation
+      // but we can pass it on _endorserCalldata and then as a constraint. Just keep in mind
+      // that we won't forward ALL implementations, only the ones that are known to be good.
+      address implementation = abi.decode(_endorserCalldata, (address));
+      if (!isKnownImplementation[implementation]) {
+        revert("Unknown provided implementation: ".concat(implementation.toString()));
+      }
+
+      _dc.addConstraint(_ec.wallet, bytes32(uint256(uint160(_ec.wallet))), implementation);      
+    }
+  }
+
+  function _controlTransactions(
+    LibEndorser.DependencyCarrier memory _dc,
+    ExecuteCall memory _call,
+    EntrypointControl memory _ec
+  ) internal view returns (uint256 gasLimit) {
+    uint256 balance = _ec.wallet.balance;
+
+    unchecked {
+      for (uint256 i = 0; i < _call.txs.length; i++) {
+        if (_call.txs[i].revertOnError) {
+          revert("Transaction with revertOnError=true: ".concat(i.toString()));
+        }
+
+        // The first transaction uses delegateCall
+        // it is the only one that can use it
+        if (i != 0 && _call.txs[i].delegateCall) {
+          revert("Transaction with delegateCall=true: ".concat(i.toString()));
+        }
+
+        if (_call.txs[i].value > balance) {
+          revert("Transaction with value > balance: ".concat(i.toString()));
+        }
+
+        balance -= _call.txs[i].value;
+        gasLimit += _call.txs[i].gasLimit;
+      }
+
+      // This transaction uses balance
+      // so it depends on the wallet's balance
+      if (balance != _ec.wallet.balance) {
+        _dc.addBalanceDependency(_ec.wallet);
+      }
+    }
+  }
+
+  function _controlFeeTransaction(
+    LibEndorser.DependencyCarrier memory _dc,
+    EntrypointControl memory _ec,
+    ExecuteCall memory _call,
+    uint256 _gasLimit,
+    uint256 _maxFeePerGas,
+    address _feeToken
+  ) internal view {
+    // The first transaction should go to the payment router
+    // we need to ask for the first, because the other transactions
+    // may spend the funds
+    if (!isTrustedPaymentRouter[_call.txs[0].target]) {
+      revert("First transaction is not to the payment router");
+    }
+
+    if (!_call.txs[0].delegateCall) {
+      revert("Payment router must use delegatecall");
+    }
+
+    if (!_call.txs[0].revertOnError) {
+      revert("Payment router must revert on error");
+    }
+
+    if (_feeToken == address(0)) {
+      // Enough balance will be checked later
+      // since we can't allow the wallet to send more than what
+      // it has to *any* address anyway
+      if (_call.txs[0].value < _maxFeePerGas * _gasLimit) {
+        revert("Not enough ether for the fee");
+      }
+
+      if (_call.txs[0].data.length != 0) {
+        revert("Payment router call with data");
+      }
+
+      // This transaction uses balance
+      _dc.addBalanceDependency(_ec.wallet);
+    } else {
+      if (_call.txs[0].value != 0) {
+        revert("Payment router call with value");
+      }
+
+      if (_call.txs[0].data.length != 64) {
+        revert("Payment router call with wrong data length");
+      }
+
+      (address token, uint256 amount) = abi.decode(_call.txs[0].data, (address, uint256));
+      if (token != _feeToken) {
+        revert("Payment router call with wrong token");
+      }
+
+      if (amount < _maxFeePerGas * _gasLimit) {
+        revert("Not enough tokens for the fee");
+      }
+
+      // The token must be supported, we validate this using the mapping mapper
+      LibEndorser.MappingMapper memory mapper = erc20BalanceMappers[_feeToken];
+      if (!mapper.exists) {
+        revert("Fee token not supported: ".concat(_feeToken.toString()));
+      }
+
+      // Here we DO NOT check the balance of the wallet
+      // NOTICE: That some ERC20s may have more rules (freezing, etc.)
+      // this endorser does not support those cases
+      ERC20 erc20 = ERC20(_feeToken);
+      if (erc20.balanceOf(_ec.wallet) < amount) {
+        revert("Not enough tokens for the fee");
+      }
+
+      // This transaction depends on the ERC20's balance
+      // each ERC20 has its own balance layout, so we use the mapping mapper.
+      _dc.addSlotDependency(_feeToken, mapper.getSlotFor(_ec.wallet));
+    }
+  }
+
+  function _controlEntrypoint(
+    address _entrypoint,
+    bytes calldata _data
+  ) internal view returns (EntrypointControl memory) {
+    // Not always is the wallet called directly
+    // in this case we can continue, we know that the
+    // factory always deploys sequence proxies
+    if (!_entrypoint.code.cmp(SEQUENCE_PROXY_CODE)) {
+      return _controlGuestModuleCall(_entrypoint, _data);
+    }
+
+    // The entrypoint is already a wallet, so we must very that
+    // it is a Sequence PROXY and that the call is to the execute method
+    if (_data[:4].cmp(IModuleCalls.execute.selector)) {
+      revert("Bad entrypoint selector: ".concat(_data[:4].toString()));
+    }
+
+    // We don't know implementation and imageHash, this will be important later
+    // during signature validation and implementation validation
+    EntrypointControl memory res;
+    res.wallet = _entrypoint;
+    res.data = _data;
+    return res;
+  }
+
+  function _decodeExecuteCall(bytes memory _data) internal pure returns (ExecuteCall memory) {
+    if (_data.slice(0, 4).cmp(IModuleCalls.execute.selector)) {
+      revert("Bad entrypoint selector: ".concat(_data.slice(0, 4).toString()));
+    }
+
+    return abi.decode(_data.slice(4), (ExecuteCall));
+  }
+
+  function _controlGuestModuleCall(
+    address _entrypoint,
+    bytes calldata _data
+  ) internal view returns (EntrypointControl memory res) {
+    // If the entrypoint is a guestModule, then it MUST
+    // be a call to execute, with no nonce or signature
+    // and it MUST only have two argument: the execute
+    // and the wallet deployment.
+    if (isGuestModule[_entrypoint]) {
+      return _controlGuestModuleCall(_entrypoint, _data);
+    }
+
+    ExecuteCall memory call = _decodeExecuteCall(_data);
+
+    if (call.nonce != 0) {
+      revert("Guest module call with nonce: ".concat(call.nonce.toString()));
+    }
+  
+    if (call.signature.length != 0) {
+      revert("Guest module call with signature: ".concat(call.signature.toString()));
+    }
+
+    if (call.txs.length != 2) {
+      revert("Guest module call with more than 2 transactions: ".concat(call.txs.length.toString()));
+    }
+
+    // The first transaction must be the Sequence factory
+    if (call.txs[0].target != sequenceFactory) {
+      revert("Guest module call with wrong factory: ".concat(call.txs[0].target.toString()));
+    }
+  
+    // It should be a call to deploy a wallet
+    if (!call.txs[0].data.slice(0, 4).cmp(Factory.deploy.selector)) {
+      revert("Guest module call with wrong factory selector: ".concat(call.txs[0].data.slice(0, 4).toString()));
+    }
+  
+    // Get the imageHash, we will need this to very the signature
+    // as the wallet does not exist yet
+    (res.implementation, res.imageHash) = abi.decode(call.txs[0].data.slice(4), (address, bytes32));
+
+    // The second transaction must be the entrypoint
+    // it contains the real calldata and the real target
+    res.wallet = call.txs[1].target;
+    res.data = call.txs[1].data;
+  }
+}
