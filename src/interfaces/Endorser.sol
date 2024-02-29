@@ -33,7 +33,8 @@ interface Endorser {
     uint256 _maxPriorityFeePerGas,
     address _feeToken,
     uint256 _feeTokenScaler,
-    uint256 _feeTokenScalingFactor
+    uint256 _feeTokenScalingFactor,
+    bool _hasUntrustedContext
   ) external returns (
     bool readiness,
     BlockDependency memory blockDependency,
