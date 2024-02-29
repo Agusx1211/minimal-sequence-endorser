@@ -427,7 +427,13 @@ contract MiniSequenceEndorser is Endorser, Owned {
       revert("Bad entrypoint selector: ".concat(_data.slice(0, 4).toString()));
     }
 
-    return abi.decode(_data.slice(4), (ExecuteCall));
+    (
+      IModuleCalls.Transaction[] memory txs,
+      uint256 nonce,
+      bytes memory signature
+    ) = abi.decode(_data.slice(4), (IModuleCalls.Transaction[], uint256, bytes));
+
+    return ExecuteCall(txs, nonce, signature);
   }
 
   function _controlGuestModuleCall(
