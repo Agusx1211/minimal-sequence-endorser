@@ -103,7 +103,8 @@ contract MiniSequenceEndorser is Endorser, Owned {
     uint256,
     address _feeToken,
     uint256,
-    uint256
+    uint256,
+    bool
   ) external returns (
     bool,
     BlockDependency memory,
