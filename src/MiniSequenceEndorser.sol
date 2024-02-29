@@ -409,7 +409,7 @@ contract MiniSequenceEndorser is Endorser, Owned {
 
     // The entrypoint is already a wallet, so we must very that
     // it is a Sequence PROXY and that the call is to the execute method
-    if (_data[:4].cmp(IModuleCalls.execute.selector)) {
+    if (bytes4(_data) != IModuleCalls.execute.selector) {
       revert("Bad entrypoint selector: ".concat(_data[:4].toString()));
     }
 
@@ -422,7 +422,7 @@ contract MiniSequenceEndorser is Endorser, Owned {
   }
 
   function _decodeExecuteCall(bytes memory _data) internal pure returns (ExecuteCall memory) {
-    if (_data.slice(0, 4).cmp(IModuleCalls.execute.selector)) {
+    if (bytes4(_data) != IModuleCalls.execute.selector) {
       revert("Bad entrypoint selector: ".concat(_data.slice(0, 4).toString()));
     }
 
@@ -465,7 +465,7 @@ contract MiniSequenceEndorser is Endorser, Owned {
     }
   
     // It should be a call to deploy a wallet
-    if (!call.txs[0].data.slice(0, 4).cmp(Factory.deploy.selector)) {
+    if (bytes4(call.txs[0].data) != Factory.deploy.selector) {
       revert("Guest module call with wrong factory selector: ".concat(call.txs[0].data.slice(0, 4).toString()));
     }
   
