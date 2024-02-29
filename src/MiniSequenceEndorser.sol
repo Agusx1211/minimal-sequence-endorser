@@ -404,7 +404,7 @@ contract MiniSequenceEndorser is Endorser, Owned {
     // Not always is the wallet called directly
     // in this case we can continue, we know that the
     // factory always deploys sequence proxies
-    if (!_entrypoint.code.cmp(SEQUENCE_PROXY_CODE)) {
+    if (!_entrypoint.code.eq(SEQUENCE_PROXY_CODE)) {
       return _controlGuestModuleCall(_entrypoint, _data);
     }
 
