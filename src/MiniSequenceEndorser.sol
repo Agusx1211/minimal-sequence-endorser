@@ -9,6 +9,7 @@ import { NoExecuteModule } from "./NoExecuteModule.sol";
 import "wallet-contracts/contracts/modules/commons/interfaces/IModuleCalls.sol";
 import "wallet-contracts/contracts/modules/commons/submodules/nonce/SubModuleNonce.sol";
 import "wallet-contracts/contracts/modules/commons/ModuleAuthUpgradable.sol";
+import "wallet-contracts/contracts/modules/commons/ModuleAuthFixed.sol";
 import "wallet-contracts/contracts/modules/commons/ModuleNonce.sol";
 import "wallet-contracts/contracts/Factory.sol";
 
@@ -144,7 +145,7 @@ contract MiniSequenceEndorser is Endorser, Owned {
 
     // The imageHash will be validated during the simulation, but we need to have it
     // available for it. We also add it as a dependency
-    _controlImagehash(dc, ec);
+    _controlImagehash(dc, ec, _endorserCallData);
 
     // Now there are only two things left to do:
     // - Validate that the signature is correct
@@ -175,7 +176,7 @@ contract MiniSequenceEndorser is Endorser, Owned {
       // this will give us a picture of the cost of the non-call parts
       // of the operation. We use a "mirror" wallet that does not perform the calls
       // or else we would end up counting all the gas used by the calls twice.
-      NoExecuteModule(noopWallet).setImageHash(_ec.imageHash);      
+      NoExecuteModule(noopWallet).setImpersonate(_ec.imageHash, _ec.wallet);
 
       bool ok;
       if (_ec.isCreate) {
@@ -203,7 +204,8 @@ contract MiniSequenceEndorser is Endorser, Owned {
 
   function _controlImagehash(
     LibEndorser.DependencyCarrier memory _dc,
-    EntrypointControl memory _ec
+    EntrypointControl memory _ec,
+    bytes calldata _endorserCallData
   ) internal view {
     // Either the wallet is new, and we have the imageHash
     // or we need to fetch it from the wallet, in both cases
@@ -212,7 +214,40 @@ contract MiniSequenceEndorser is Endorser, Owned {
     _dc.addSlotDependency(_ec.wallet, IMAGE_HASH_KEY);
 
     if (!_ec.isCreate) {
-      _ec.imageHash = ModuleAuthUpgradable(_ec.wallet).imageHash();
+      (bool ok, bytes memory res) = _ec.wallet.staticcall(abi.encodeWithSelector(ModuleAuthUpgradable.imageHash.selector));
+
+      if (ok && res.length == 32) {
+        _ec.imageHash = abi.decode(res, (bytes32));
+      } else {
+        // This is a counter-factual wallet, so we expect
+        // the endorserCallData to provide the imageHash
+        // we also need to verify it by computing the sequence address
+        if (_endorserCallData.length != 64) {
+          revert("counter-factual wallet must provide implementation AND imageHash on endorser calldata");
+        }
+
+        (, bytes32 imageHash) = abi.decode(_endorserCallData, (address, bytes32));
+        address counterFactualAddr = address(
+          uint160(
+            uint256(
+              keccak256(
+                abi.encodePacked(
+                  hex"ff",
+                  sequenceFactory,
+                  imageHash,
+                  ModuleAuthFixed(_ec.wallet).INIT_CODE_HASH()
+                )
+              )
+            )
+          )
+        );
+
+        if (counterFactualAddr != _ec.wallet) {
+          revert("Invalid counter-factual wallet address: ".concat(counterFactualAddr.toString().concat(" != ").concat(_ec.wallet.toString())));
+        }
+
+        _ec.imageHash = imageHash;
+      }
     }
 
     if (_ec.imageHash == bytes32(0)) {
@@ -296,14 +331,16 @@ contract MiniSequenceEndorser is Endorser, Owned {
 
     unchecked {
       for (uint256 i = 0; i < _call.txs.length; i++) {
-        if (_call.txs[i].revertOnError) {
-          revert("Transaction with revertOnError=true: ".concat(i.toString()));
-        }
+        if (i != 0) {
+          if (_call.txs[i].revertOnError) {
+            revert("Transaction with revertOnError=true: ".concat(i.toString()));
+          }
 
-        // The first transaction uses delegateCall
-        // it is the only one that can use it
-        if (i != 0 && _call.txs[i].delegateCall) {
-          revert("Transaction with delegateCall=true: ".concat(i.toString()));
+          // The first transaction uses delegateCall
+          // it is the only one that can use it
+          if (i != 0 && _call.txs[i].delegateCall) {
+            revert("Transaction with delegateCall=true: ".concat(i.toString()));
+          }
         }
 
         if (_call.txs[i].value > balance) {
