@@ -2,7 +2,6 @@ pragma solidity ^0.8.0;
 
 import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { Owned } from "solmate/auth/Owned.sol";
-import { Endorser } from "./interfaces/Endorser.sol";
 import { LibSequenceSig } from "./utils/LibSequenceSig.sol";
 import { NoExecuteModule } from "./NoExecuteModule.sol";
 
@@ -12,16 +11,17 @@ import "wallet-contracts/contracts/modules/commons/ModuleAuthUpgradable.sol";
 import "wallet-contracts/contracts/modules/commons/ModuleAuthFixed.sol";
 import "wallet-contracts/contracts/modules/commons/ModuleNonce.sol";
 import "wallet-contracts/contracts/Factory.sol";
+import "erc5189-libs/interfaces/IEndorser.sol";
 
-import "./utils/LibString2.sol";
 import "./utils/LibEndorser.sol";
+import "./utils/LibString2.sol";
 import "./utils/LibBytes2.sol";
 
 // This is a simple Sequence transaction endorser
 // that if the transaction pays THE FULL fee at the end
 // of the transaction. It does not account for any possible
 // refunding to the wallet.
-contract MiniSequenceEndorser is Endorser, Owned {
+contract MiniSequenceEndorser is IEndorser, Owned {
   using LibString2 for *;
   using LibBytes2 for *;
   using LibEndorser for *;
@@ -108,8 +108,8 @@ contract MiniSequenceEndorser is Endorser, Owned {
     bool
   ) external returns (
     bool,
-    BlockDependency memory,
-    Dependency[] memory
+    IEndorser.GlobalDependency memory,
+    IEndorser.Dependency[] memory
   ) {
     // Create a new dependency carrier
     // this will be passed around to any function that may have
@@ -161,7 +161,7 @@ contract MiniSequenceEndorser is Endorser, Owned {
 
     return (
       true,
-      dc.blockDependency,
+      dc.globalDependency,
       dc.dependencies
     );
   }

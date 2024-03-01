@@ -2,7 +2,6 @@ pragma solidity ^0.8.0;
 
 import "wallet-contracts/contracts/modules/MainModuleUpgradable.sol";
 
-
 contract NoExecuteModule is MainModuleUpgradable {
   event StubEvent();
 

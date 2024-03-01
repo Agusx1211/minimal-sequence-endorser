@@ -1,18 +1,19 @@
 pragma solidity ^0.8.0;
 
+import "erc5189-libs/interfaces/IEndorser.sol";
+
 import "./LibMath.sol";
-import "../interfaces/Endorser.sol";
 
 
 library LibEndorser {
   using LibEndorser for *;
 
   struct DependencyCarrier {
-    Endorser.BlockDependency blockDependency;
-    Endorser.Dependency[] dependencies;
+    IEndorser.GlobalDependency globalDependency;
+    IEndorser.Dependency[] dependencies;
   }
 
-  function dependencyFor(DependencyCarrier memory _carrier, address _addr) internal pure returns (Endorser.Dependency memory) {
+  function dependencyFor(DependencyCarrier memory _carrier, address _addr) internal pure returns (IEndorser.Dependency memory) {
     unchecked {
       for (uint256 i = 0; i != _carrier.dependencies.length; i++) {
         if (_carrier.dependencies[i].addr == _addr) {
@@ -21,10 +22,10 @@ library LibEndorser {
       }
 
       // We need to create a new dependency for this address, and add it to the carrier
-      Endorser.Dependency memory dep;
+      IEndorser.Dependency memory dep;
       dep.addr = _addr;
 
-      Endorser.Dependency[] memory newDeps = new Endorser.Dependency[](_carrier.dependencies.length + 1);
+      IEndorser.Dependency[] memory newDeps = new IEndorser.Dependency[](_carrier.dependencies.length + 1);
       for (uint256 i = 0; i != _carrier.dependencies.length; i++) {
         newDeps[i] = _carrier.dependencies[i];
       }
@@ -54,7 +55,7 @@ library LibEndorser {
 
   function addSlotDependency(DependencyCarrier memory _carrier, address _addr, bytes32 _slot) internal pure {
     unchecked {
-      Endorser.Dependency memory dep = dependencyFor(_carrier, _addr);
+      IEndorser.Dependency memory dep = dependencyFor(_carrier, _addr);
 
       for (uint256 i = 0; i != dep.slots.length; i++) {
         if (dep.slots[i] == _slot) {
@@ -82,9 +83,9 @@ library LibEndorser {
 
   function addConstraint(DependencyCarrier memory _carrier, address _addr, bytes32 _slot, bytes32 _minValue, bytes32 _maxValue) internal pure {
     unchecked {
-      Endorser.Dependency memory dep = dependencyFor(_carrier, _addr);
+      IEndorser.Dependency memory dep = dependencyFor(_carrier, _addr);
 
-      Endorser.Constraint memory constraint;
+      IEndorser.Constraint memory constraint;
       bool exists;
 
       for (uint256 i = 0; i != dep.constraints.length; i++) {
@@ -112,7 +113,7 @@ library LibEndorser {
       constraint.maxValue = _maxValue;
 
       // Add the new constraint to the dependency
-      Endorser.Constraint[] memory newConstraints = new Endorser.Constraint[](dep.constraints.length + 1);
+      IEndorser.Constraint[] memory newConstraints = new IEndorser.Constraint[](dep.constraints.length + 1);
       for (uint256 i = 0; i != dep.constraints.length; i++) {
         newConstraints[i] = dep.constraints[i];
       }
