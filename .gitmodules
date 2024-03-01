@@ -7,3 +7,6 @@
 [submodule "lib/wallet-contracts"]
 	path = lib/wallet-contracts
 	url = https://github.com/0xsequence/wallet-contracts
+[submodule "lib/erc5189-libs"]
+	path = lib/erc5189-libs
+	url = https://github.com/0xsequence/erc5189-libs
