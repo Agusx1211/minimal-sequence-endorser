@@ -37,7 +37,7 @@ library LibSequenceSig {
         }
 
         if (flag == _FLAG_ADDRESS) {
-          rindex += 20; // [u8: weight, address: addr]
+          rindex += 21; // [u8: weight, address: addr]
           continue;
         }
 
@@ -54,12 +54,12 @@ library LibSequenceSig {
         }
 
         if (flag == _FLAG_NODE) {
-          rindex += 32; // [u8: weight, bytes32: node]
+          rindex += 32; // [bytes32: node]
           continue;
         }
 
         if (flag == _FLAG_SUBDIGEST) {
-          rindex += 32; // [u8: weight, bytes32: subdigest]
+          rindex += 32; // [bytes32: subdigest]
           continue;
         }
 
