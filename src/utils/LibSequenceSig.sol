@@ -44,10 +44,10 @@ library LibSequenceSig {
         if (flag == _FLAG_DYNAMIC_SIGNATURE) {
           rindex += 1; // [u8: weight]
 
-          res = res.append(_sig.slice(rindex, rindex+20).toAddress());
+          res = res.append(_sig.slice(rindex, 20).toAddress());
           rindex += 20; // [address: addr]
         
-          uint256 size = _sig.slice(rindex, rindex+3).toUint24();
+          uint256 size = _sig.slice(rindex, 3).toUint24();
           rindex += 3;    // [u24: size]
           rindex += size; // [bytes: signature]
           continue;
@@ -64,10 +64,10 @@ library LibSequenceSig {
         }
 
         if (flag == _FLAG_BRANCH) {
-          uint256 size = _sig.slice(rindex, rindex+3).toUint24();
+          uint256 size = _sig.slice(rindex, 3).toUint24();
           rindex += 3;    // [u24: size]
 
-          bytes memory branch = _sig.slice(rindex, rindex+size);
+          bytes memory branch = _sig.slice(rindex, size);
           rindex += size; // [bytes: branch]
 
           res = res.append(readEIP1271FromTree(branch));
@@ -77,10 +77,10 @@ library LibSequenceSig {
         if (flag == _FLAG_NESTED) {
           rindex += 3; // [u8: externalWeight, u16: internalThreshold]
 
-          uint256 size = _sig.slice(rindex, rindex+3).toUint24();
+          uint256 size = _sig.slice(rindex, 3).toUint24();
           rindex += 3;    // [u24: size]
 
-          bytes memory nested = _sig.slice(rindex, rindex+size);
+          bytes memory nested = _sig.slice(rindex, size);
           rindex += size; // [bytes: nested]
 
           res = res.append(readEIP1271FromTree(nested));
@@ -113,9 +113,9 @@ library LibSequenceSig {
         address[] memory res;
 
         while (rindex < _sig.length) {
-          uint256 size = _sig.slice(rindex+1, rindex+4).toUint24();
+          uint256 size = _sig.slice(rindex+1, 3).toUint24();
           rindex += 4;    // [u24: size]
-          res = res.append(readEIP1271FromTree(_sig.slice(rindex, rindex+size)));
+          res = res.append(readEIP1271FromTree(_sig.slice(rindex, size)));
           rindex += size; // [bytes: tree]
         }
 
