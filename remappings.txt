@@ -1,4 +1,6 @@
 ds-test/=lib/forge-std/lib/ds-test/src/
+erc5189-libs/=lib/erc5189-libs/contracts/
 forge-std/=lib/forge-std/src/
+solady/=lib/erc5189-libs/lib/solady/src/
 solmate/=lib/solmate/src/
 wallet-contracts/=lib/wallet-contracts/

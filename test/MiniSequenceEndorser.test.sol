@@ -1,6 +1,7 @@
 pragma solidity ^0.8.0;
 
 import "wallet-contracts/contracts/modules/commons/interfaces/IModuleCalls.sol";
+import "erc5189-libs/interfaces/IEndorser.sol";
 
 import { Test, console } from "forge-std/Test.sol";
 import { MiniSequenceEndorser } from "../src/MiniSequenceEndorser.sol";
@@ -35,7 +36,6 @@ contract MiniSequenceEndorserTest is Test {
   function testEndorse() external {
     // Signer address
     uint256 pk = uint256(2);
-    address addr = vm.addr(pk);
 
     // Imagehash of the wallet
     // TODO
@@ -77,11 +77,6 @@ contract MiniSequenceEndorserTest is Test {
       )
     );
 
-    console.log("-----");
-    console.logBytes32(digest);
-    console.logBytes32(subdigest);
-    console.log("-----");
-
     (
       uint8 _v,
       bytes32 _r,
@@ -106,17 +101,14 @@ contract MiniSequenceEndorserTest is Test {
       signature
     );
 
-    endorser.isOperationReady(
-      wallet,
-      data,
-      abi.encode(mainModule, imageHash),
-      500_000,
-      100 gwei,
-      0,
-      address(0),
-      0,
-      0,
-      false
-    );
+    IEndorser.Operation memory operation;
+    operation.entrypoint = wallet;
+    operation.data = data;
+    operation.endorserCallData = abi.encode(address(mainModule), imageHash);
+    operation.fixedGas = 0;
+    operation.gasLimit = 500_000;
+    operation.maxFeePerGas = 100 gwei;
+
+    endorser.isOperationReady(operation);
   }
 }

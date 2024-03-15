@@ -4,6 +4,7 @@ import { ERC20 } from "solmate/tokens/ERC20.sol";
 import { Owned } from "solmate/auth/Owned.sol";
 import { LibSequenceSig } from "./utils/LibSequenceSig.sol";
 import { NoExecuteModule } from "./NoExecuteModule.sol";
+import { LibString } from "erc5189-libs/LibString.sol";
 
 import "wallet-contracts/contracts/modules/commons/interfaces/IModuleCalls.sol";
 import "wallet-contracts/contracts/modules/commons/submodules/nonce/SubModuleNonce.sol";
@@ -14,7 +15,6 @@ import "wallet-contracts/contracts/Factory.sol";
 import "erc5189-libs/interfaces/IEndorser.sol";
 
 import "./utils/LibEndorser.sol";
-import "./utils/LibString2.sol";
 import "./utils/LibBytes2.sol";
 
 // This is a simple Sequence transaction endorser
@@ -22,7 +22,7 @@ import "./utils/LibBytes2.sol";
 // of the transaction. It does not account for any possible
 // refunding to the wallet.
 contract MiniSequenceEndorser is IEndorser, Owned {
-  using LibString2 for *;
+  using LibString for *;
   using LibBytes2 for *;
   using LibEndorser for *;
 
@@ -96,16 +96,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
   }
 
   function isOperationReady(
-    address _entrypoint,
-    bytes calldata _data,
-    bytes calldata _endorserCallData,
-    uint256 _gasLimit,
-    uint256 _maxFeePerGas,
-    uint256,
-    address _feeToken,
-    uint256,
-    uint256,
-    bool
+    IEndorser.Operation calldata _op
   ) external returns (
     bool,
     IEndorser.GlobalDependency memory,
@@ -118,13 +109,13 @@ contract MiniSequenceEndorser is IEndorser, Owned {
 
     // Check if the entrypoint is a Sequence
     // wallet or a guest module, and fetch the meaningful data
-    EntrypointControl memory ec = _controlEntrypoint(_entrypoint, _data);
+    EntrypointControl memory ec = _controlEntrypoint(_op.entrypoint, _op.data);
 
     // We will use this call data a few times
-    ExecuteCall memory call = _decodeExecuteCall(_data);
+    ExecuteCall memory call = _decodeExecuteCall(_op.data);
 
     // This verifies that the first transaction is the payment to the bundler
-    uint256 usedEth = _controlFeeTransaction(dc, ec, call, _gasLimit, _maxFeePerGas, _feeToken);
+    uint256 usedEth = _controlFeeTransaction(dc, ec, call, _op.gasLimit, _op.maxFeePerGas, _op.feeToken);
 
     // We need to verify that all transactions are safe (revertOnError=false,delegateCall=false)
     // we also need to verify that the wallet isn't transfering more funds than what it has
@@ -134,7 +125,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
 
     // We need to validate the implementation, or else we can't guarantee
     // that the wallet will behave as we expect
-    _controlImplementation(dc, _endorserCallData, ec);
+    _controlImplementation(dc, _op.endorserCallData, ec);
 
     // The nonce determines that the transaction has not been replayed yet
     _controlNonce(dc, call, ec);
@@ -145,7 +136,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
 
     // The imageHash will be validated during the simulation, but we need to have it
     // available for it. We also add it as a dependency
-    _controlImagehash(dc, ec, _endorserCallData);
+    _controlImagehash(dc, ec, _op.endorserCallData);
 
     // Now there are only two things left to do:
     // - Validate that the signature is correct
@@ -153,10 +144,10 @@ contract MiniSequenceEndorser is IEndorser, Owned {
     // Because all the other variables have been resolved, we can now just simulate the
     // operation. If the operation succeeds we can measure the gas, and if the gasLimit is
     // enough, then we know that the operation is ready.
-    txsGasLimit += _simulateOperation(ec, _entrypoint, _data);
+    txsGasLimit += _simulateOperation(ec, _op.entrypoint, _op.data);
 
-    if (txsGasLimit > _gasLimit) {
-      revert("Gas limit exceeded: ".concat(txsGasLimit.toString()).concat(" > ").concat(_gasLimit.toString()));
+    if (txsGasLimit > _op.gasLimit) {
+      revert("Gas limit exceeded: ".c(txsGasLimit).c(" > ".s()).c(_op.gasLimit));
     }
 
     return (
@@ -243,7 +234,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
         );
 
         if (counterFactualAddr != _ec.wallet) {
-          revert("Invalid counter-factual wallet address: ".concat(counterFactualAddr.toString().concat(" != ").concat(_ec.wallet.toString())));
+          revert("Invalid counter-factual wallet address: ".c(counterFactualAddr).c(" != ".s()).c(_ec.wallet));
         }
 
         _ec.imageHash = imageHash;
@@ -265,7 +256,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
       // We can't just mark the signer as a dependency, because
       // the signer MAY also have nested signers
       if (!isTrustedNestedSigner[eip1271Signers[i]]) {
-        revert("Untrusted nested signer: ".concat(eip1271Signers[i].toString()));
+        revert("Untrusted nested signer: ".c(eip1271Signers[i]));
       }
     }
   }
@@ -279,7 +270,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
 
     uint256 currentNonce = ModuleNonce(_ec.wallet).readNonce(space);
     if (nonce != currentNonce) {
-      revert("Invalid nonce: ".concat(nonce.toString()).concat(" != ").concat(currentNonce.toString()));
+      revert("Invalid nonce: ".c(nonce).c(" != ".s()).c(currentNonce));
     }
 
     // This transaction depends on this specific nonce space
@@ -296,7 +287,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
     // we can just check if it is a good one
     if (_ec.implementation != address(0)) {
       if (!isKnownImplementation[_ec.implementation]) {
-        revert("Unknown implementation: ".concat(_ec.implementation.toString()));
+        revert("Unknown implementation: ".c(_ec.implementation));
       }
 
       // The wallet is not deployed, this means that the wallet code itself
@@ -308,7 +299,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
       // that we won't forward ALL implementations, only the ones that are known to be good.
       address implementation = abi.decode(_endorserCalldata, (address));
       if (!isKnownImplementation[implementation]) {
-        revert("Unknown provided implementation: ".concat(implementation.toString()));
+        revert("Unknown provided implementation: ".c(implementation));
       }
 
       _dc.addConstraint(_ec.wallet, bytes32(uint256(uint160(_ec.wallet))), implementation);      
@@ -324,7 +315,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
     uint256 balance = _ec.wallet.balance;
 
     if (usedEth > balance) {
-      revert("Not enough balance for eth fee: ".concat(usedEth.toString()).concat(" > ").concat(balance.toString()));
+      revert("Not enough balance for eth fee: ".c(usedEth).c(" > ".s()).c(balance));
     }
 
     balance -= usedEth;
@@ -333,18 +324,18 @@ contract MiniSequenceEndorser is IEndorser, Owned {
       for (uint256 i = 0; i < _call.txs.length; i++) {
         if (i != 0) {
           if (_call.txs[i].revertOnError) {
-            revert("Transaction with revertOnError=true: ".concat(i.toString()));
+            revert("Transaction with revertOnError=true: ".c(i));
           }
 
           // The first transaction uses delegateCall
           // it is the only one that can use it
           if (i != 0 && _call.txs[i].delegateCall) {
-            revert("Transaction with delegateCall=true: ".concat(i.toString()));
+            revert("Transaction with delegateCall=true: ".c(i));
           }
         }
 
         if (_call.txs[i].value > balance) {
-          revert("Transaction with value > balance: ".concat(i.toString()));
+          revert("Transaction with value > balance: ".c(i));
         }
 
         balance -= _call.txs[i].value;
@@ -395,7 +386,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
 
       ethUsed = abi.decode(_call.txs[0].data, (uint256));
       if (ethUsed < feeAmount) {
-        revert("Not enough ether for the fee: ".concat(ethUsed.toString()).concat(" < ").concat(feeAmount.toString()));
+        revert("Not enough ether for the fee: ".c(ethUsed).c(" < ".s()).c(feeAmount));
       }
 
       // This transaction uses balance
@@ -411,13 +402,13 @@ contract MiniSequenceEndorser is IEndorser, Owned {
       }
 
       if (amount < feeAmount) {
-        revert("Not enough tokens for the fee: ".concat(amount.toString()).concat(" < ").concat(feeAmount.toString()));
+        revert("Not enough tokens for the fee: ".c(amount).c(" < ".s()).c(feeAmount));
       }
 
       // The token must be supported, we validate this using the mapping mapper
       LibEndorser.MappingMapper memory mapper = erc20BalanceMappers[_feeToken];
       if (!mapper.exists) {
-        revert("Fee token not supported: ".concat(_feeToken.toString()));
+        revert("Fee token not supported: ".c(_feeToken));
       }
 
       // Here we DO NOT check the balance of the wallet
@@ -448,7 +439,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
     // The entrypoint is already a wallet, so we must very that
     // it is a Sequence PROXY and that the call is to the execute method
     if (bytes4(_data) != IModuleCalls.execute.selector) {
-      revert("Bad entrypoint selector: ".concat(_data[:4].toString()));
+      revert("Bad entrypoint selector: ".c(_data[:4]));
     }
 
     // We don't know implementation and imageHash, this will be important later
@@ -461,7 +452,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
 
   function _decodeExecuteCall(bytes memory _data) internal pure returns (ExecuteCall memory) {
     if (bytes4(_data) != IModuleCalls.execute.selector) {
-      revert("Bad entrypoint selector: ".concat(_data.slice(0, 4).toString()));
+      revert("Bad entrypoint selector: ".c(_data.slice(0, 4)));
     }
 
     (
@@ -488,29 +479,29 @@ contract MiniSequenceEndorser is IEndorser, Owned {
     ExecuteCall memory call = _decodeExecuteCall(_data);
 
     if (call.nonce != 0) {
-      revert("Guest module call with nonce: ".concat(call.nonce.toString()));
+      revert("Guest module call with nonce: ".c(call.nonce));
     }
   
     if (call.signature.length != 0) {
-      revert("Guest module call with signature: ".concat(call.signature.toString()));
+      revert("Guest module call with signature: ".c(call.signature));
     }
 
     if (call.txs.length != 2) {
-      revert("Guest module call with more than 2 transactions: ".concat(call.txs.length.toString()));
+      revert("Guest module call with more than 2 transactions: ".c(call.txs.length));
     }
 
     if (call.txs[0].value != 0) {
-      revert("Guest module call with value: ".concat(call.txs[0].value.toString()));
+      revert("Guest module call with value: ".c(call.txs[0].value));
     }
 
     // The first transaction must be the Sequence factory
     if (call.txs[0].target != sequenceFactory) {
-      revert("Guest module call with wrong factory: ".concat(call.txs[0].target.toString()));
+      revert("Guest module call with wrong factory: ".c(call.txs[0].target));
     }
   
     // It should be a call to deploy a wallet
     if (bytes4(call.txs[0].data) != Factory.deploy.selector) {
-      revert("Guest module call with wrong factory selector: ".concat(call.txs[0].data.slice(0, 4).toString()));
+      revert("Guest module call with wrong factory selector: ".c(call.txs[0].data.slice(0, 4)));
     }
   
     // Get the imageHash, we will need this to very the signature
@@ -523,4 +514,9 @@ contract MiniSequenceEndorser is IEndorser, Owned {
     res.data = call.txs[1].data;
     res.isCreate = true;
   }
+
+  function simulationSettings() external pure returns (Replacement[] memory) {
+
+  }
+
 }
