@@ -5,6 +5,8 @@ import { Owned } from "solmate/auth/Owned.sol";
 import { LibSequenceSig } from "./utils/LibSequenceSig.sol";
 import { NoExecuteModule } from "./NoExecuteModule.sol";
 import { LibString } from "erc5189-libs/LibString.sol";
+import { LibDc, Dc } from "erc5189-libs/LibDc.sol";
+import { LibSlot } from "erc5189-libs/LibSlot.sol";
 
 import "wallet-contracts/contracts/modules/commons/interfaces/IModuleCalls.sol";
 import "wallet-contracts/contracts/modules/commons/submodules/nonce/SubModuleNonce.sol";
@@ -14,7 +16,6 @@ import "wallet-contracts/contracts/modules/commons/ModuleNonce.sol";
 import "wallet-contracts/contracts/Factory.sol";
 import "erc5189-libs/interfaces/IEndorser.sol";
 
-import "./utils/LibEndorser.sol";
 import "./utils/LibBytes2.sol";
 
 // This is a simple Sequence transaction endorser
@@ -24,7 +25,12 @@ import "./utils/LibBytes2.sol";
 contract MiniSequenceEndorser is IEndorser, Owned {
   using LibString for *;
   using LibBytes2 for *;
-  using LibEndorser for *;
+  using LibDc for *;
+
+  struct MappingMapper {
+    bool exists;
+    uint248 position;
+  }
 
   //                       NONCE_KEY = keccak256("org.arcadeum.module.calls.nonce");
   bytes32 private constant NONCE_KEY = bytes32(0x8d0bf1fd623d628c741362c1289948e57b3e2905218c676d3e69abee36d6ae2e);
@@ -32,7 +38,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
   bytes32 internal constant IMAGE_HASH_KEY = bytes32(0xea7157fa25e3aa17d0ae2d5280fa4e24d421c61842aa85e45194e1145aa72bf8);
   bytes private constant SEQUENCE_PROXY_CODE = hex"363d3d373d3d3d363d30545af43d82803e903d91601857fd5bf3";
 
-  mapping(address => LibEndorser.MappingMapper) public erc20BalanceMappers;
+  mapping(address => MappingMapper) public erc20BalanceMappers;
 
   mapping(address => bool) public isKnownImplementation;
   mapping(address => bool) public isGuestModule;
@@ -105,7 +111,13 @@ contract MiniSequenceEndorser is IEndorser, Owned {
     // Create a new dependency carrier
     // this will be passed around to any function that may have
     // a dependency to add
-    LibEndorser.DependencyCarrier memory dc;
+    Dc memory dc;
+
+    // For now we enforce fixedGas == 0
+    // we can remove this restriction later
+    if (_op.fixedGas != 0) {
+      revert("Fixed gas must be 0");
+    }
 
     // Check if the entrypoint is a Sequence
     // wallet or a guest module, and fetch the meaningful data
@@ -150,11 +162,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
       revert("Gas limit exceeded: ".c(txsGasLimit).c(" > ".s()).c(_op.gasLimit));
     }
 
-    return (
-      true,
-      dc.globalDependency,
-      dc.dependencies
-    );
+    return dc.build();
   }
 
   function _simulateOperation(
@@ -194,7 +202,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
   }
 
   function _controlImagehash(
-    LibEndorser.DependencyCarrier memory _dc,
+    Dc memory _dc,
     EntrypointControl memory _ec,
     bytes calldata _endorserCallData
   ) internal view {
@@ -262,7 +270,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
   }
 
   function _controlNonce(
-    LibEndorser.DependencyCarrier memory _dc,
+    Dc memory _dc,
     ExecuteCall memory _call,
     EntrypointControl memory _ec
   ) internal view {
@@ -279,7 +287,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
   }
 
   function _controlImplementation(
-    LibEndorser.DependencyCarrier memory _dc,
+    Dc memory _dc,
     bytes calldata _endorserCalldata,
     EntrypointControl memory _ec
   ) internal view {
@@ -307,7 +315,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
   }
 
   function _controlTransactions(
-    LibEndorser.DependencyCarrier memory _dc,
+    Dc memory _dc,
     ExecuteCall memory _call,
     EntrypointControl memory _ec,
     uint256 usedEth
@@ -351,7 +359,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
   }
 
   function _controlFeeTransaction(
-    LibEndorser.DependencyCarrier memory _dc,
+    Dc memory _dc,
     EntrypointControl memory _ec,
     ExecuteCall memory _call,
     uint256 _gasLimit,
@@ -406,7 +414,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
       }
 
       // The token must be supported, we validate this using the mapping mapper
-      LibEndorser.MappingMapper memory mapper = erc20BalanceMappers[_feeToken];
+      MappingMapper memory mapper = erc20BalanceMappers[_feeToken];
       if (!mapper.exists) {
         revert("Fee token not supported: ".c(_feeToken));
       }
@@ -421,7 +429,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
 
       // This transaction depends on the ERC20's balance
       // each ERC20 has its own balance layout, so we use the mapping mapper.
-      _dc.addSlotDependency(_feeToken, mapper.getSlotFor(_ec.wallet));
+      _dc.addSlotDependency(_feeToken, LibSlot.getMappingStorageSlot(bytes32(uint256(mapper.position)), _ec.wallet));
     }
   }
 
