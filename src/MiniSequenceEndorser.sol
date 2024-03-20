@@ -124,7 +124,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
     EntrypointControl memory ec = _controlEntrypoint(_op.entrypoint, _op.data);
 
     // We will use this call data a few times
-    ExecuteCall memory call = _decodeExecuteCall(_op.data);
+    ExecuteCall memory call = _decodeExecuteCall(ec.data);
 
     // This verifies that the first transaction is the payment to the bundler
     uint256 usedEth = _controlFeeTransaction(dc, ec, call, _op.gasLimit, _op.maxFeePerGas, _op.feeToken);
@@ -276,7 +276,7 @@ contract MiniSequenceEndorser is IEndorser, Owned {
   ) internal view {
     (uint256 space, uint256 nonce) = SubModuleNonce.decodeNonce(_call.nonce);
 
-    uint256 currentNonce = ModuleNonce(_ec.wallet).readNonce(space);
+    uint256 currentNonce = _fetchNonce(_ec.wallet, space);
     if (nonce != currentNonce) {
       revert("Invalid nonce: ".c(nonce).c(" != ".s()).c(currentNonce));
     }
@@ -284,6 +284,14 @@ contract MiniSequenceEndorser is IEndorser, Owned {
     // This transaction depends on this specific nonce space
     bytes32 nonceSlot = keccak256(abi.encode(NONCE_KEY, space));
     _dc.addSlotDependency(_ec.wallet, nonceSlot);
+  }
+
+  function _fetchNonce(address _wallet, uint256 _space) internal view returns (uint256) {
+    if (address(_wallet).code.length == 0) {
+      return 0;
+    }
+
+    return ModuleNonce(_wallet).readNonce(_space);
   }
 
   function _controlImplementation(
