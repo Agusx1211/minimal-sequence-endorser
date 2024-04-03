@@ -15,6 +15,7 @@ import "wallet-contracts/contracts/modules/commons/ModuleAuthFixed.sol";
 import "wallet-contracts/contracts/modules/commons/ModuleNonce.sol";
 import "wallet-contracts/contracts/Factory.sol";
 import "erc5189-libs/interfaces/IEndorser.sol";
+import "erc5189-libs/interfaces/IReceiptProvider.sol";
 
 import "./utils/LibBytes2.sol";
 
@@ -22,7 +23,7 @@ import "./utils/LibBytes2.sol";
 // that if the transaction pays THE FULL fee at the end
 // of the transaction. It does not account for any possible
 // refunding to the wallet.
-contract MiniSequenceEndorser is IEndorser, Owned {
+contract MiniSequenceEndorser is IEndorser, IReceiptProvider, Owned {
   using LibString for *;
   using LibBytes2 for *;
   using LibDc for *;
@@ -32,11 +33,35 @@ contract MiniSequenceEndorser is IEndorser, Owned {
     uint248 position;
   }
 
+  address private constant GUEST_MODULE_V1 = 0x02390F3E6E5FD1C6786CB78FD3027C117a9955A7;
+  address private constant MAIN_MODULE_V1 = 0xd01F11855bCcb95f88D7A48492F66410d4637313;
+  address private constant MAIN_MODULE_UPGRADABLE_V1 = 0x7EFE6cE415956c5f80C6530cC6cc81b4808F6118;
+
+  address private constant GUEST_MODULE_V2 = 0xfea230Ee243f88BC698dD8f1aE93F8301B6cdfaE;
+  address private constant MAIN_MODULE_V2 = 0xfBf8f1A5E00034762D928f46d438B947f5d4065d;
+  address private constant MAIN_MODULE_UPGRADABLE_V2 = 0x4222dcA3974E39A8b41c411FeDDE9b09Ae14b911;
+
+  //                       NONCE_CHANGE_V1 = keccak256("NonceChange(uint256,uint256)");
+  bytes32 private constant NONCE_CHANGE_V1 = 0x1f180c27086c7a39ea2a7b25239d1ab92348f07ca7bb59d1438fcf527568f881;
+  //                       NONCE_CHANGE_V2 = keccak256("NonceChange(uint256,uint256)");
+  bytes32 private constant NONCE_CHANGE_V2 = 0x1f180c27086c7a39ea2a7b25239d1ab92348f07ca7bb59d1438fcf527568f881;
+  //                       TX_FAILED_V1 = keccak256("TxFailed(bytes32,bytes)");
+  bytes32 private constant TX_FAILED_V1 = 0x3dbd1590ea96dd3253a91f24e64e3a502e1225d602a5731357bc12643070ccd7;
+  //                       TX_EXECUTED_V2 = keccak256("TxExecuted(bytes32,uint256)");
+  bytes32 private constant TX_EXECUTED_V2 = 0x5c4eeb02dabf8976016ab414d617f9a162936dcace3cdef8c69ef6e262ad5ae7;
+  //                       TX_FAILED_V2 = keccak256("TxFailed(bytes32,uint256,bytes)");
+  bytes32 private constant TX_FAILED_V2 = 0xab46c69f7f32e1bf09b0725853da82a211e5402a0600296ab499a2fb5ea3b419;
+
   //                       NONCE_KEY = keccak256("org.arcadeum.module.calls.nonce");
   bytes32 private constant NONCE_KEY = bytes32(0x8d0bf1fd623d628c741362c1289948e57b3e2905218c676d3e69abee36d6ae2e);
   //                        IMAGE_HASH_KEY = keccak256("org.arcadeum.module.auth.upgradable.image.hash");
   bytes32 internal constant IMAGE_HASH_KEY = bytes32(0xea7157fa25e3aa17d0ae2d5280fa4e24d421c61842aa85e45194e1145aa72bf8);
   bytes private constant SEQUENCE_PROXY_CODE = hex"363d3d373d3d3d363d30545af43d82803e903d91601857fd5bf3";
+
+  bytes1 private constant LEGACY_TYPE = hex"00";
+  bytes1 private constant DYNAMIC_TYPE = hex"01";
+  bytes1 private constant NO_CHAIN_ID_TYPE = hex"02";
+  bytes1 private constant CHAINED_TYPE = hex"03";
 
   mapping(address => MappingMapper) public erc20BalanceMappers;
 
@@ -535,4 +560,230 @@ contract MiniSequenceEndorser is IEndorser, Owned {
 
   }
 
+  function operationFilter(
+    IEndorser.Operation calldata operation
+  ) external view returns (
+    address _address,
+    bytes32[][] memory topics
+  ) {
+    _address = operation.entrypoint;
+
+    ExecuteCall memory call = _decodeExecuteCall(operation.data);
+
+    if (_address == GUEST_MODULE_V1) {
+      // TODO: There's no possible filter that can detect v1 TxExecuted events.
+    } else if (_address == GUEST_MODULE_V2) {
+      bytes32 digest = keccak256(abi.encode('guest:', call.txs));
+      bytes32 subdigest = keccak256(abi.encodePacked("\x19\x01", block.chainid, _address, digest));
+
+      topics = new bytes32[][](2);
+      topics[0] = new bytes32[](2);
+      topics[0][0] = TX_EXECUTED_V2;
+      topics[0][1] = TX_FAILED_V2;
+      topics[1] = new bytes32[](1);
+      topics[1][0] = subdigest;
+
+      return (_address, topics);
+    } else {
+      address implementation = abi.decode(operation.endorserCallData, (address));
+
+      if (implementation == MAIN_MODULE_V1 || implementation == MAIN_MODULE_UPGRADABLE_V1) {
+        // TODO: There's no possible filter that can detect v1 TxExecuted events.
+      } else if (implementation == MAIN_MODULE_V2 || implementation == MAIN_MODULE_UPGRADABLE_V2) {
+        bytes32 digest = keccak256(abi.encode(call.nonce, call.txs));
+        bytes32 subdigest = subdigestV2(_address, digest, call.signature);
+
+        topics = new bytes32[][](2);
+        topics[0] = new bytes32[](2);
+        topics[0][0] = TX_EXECUTED_V2;
+        topics[0][1] = TX_FAILED_V2;
+        topics[1] = new bytes32[](1);
+        topics[1][0] = subdigest;
+
+        return (_address, topics);
+      } else {
+        // Unknown implementation
+      }
+    }
+
+    return (0x0000000000000000000000000000000000000000, topics);
+  }
+
+  function operationReceipt(
+    IEndorser.Operation calldata operation,
+    IReceiptProvider.Log[] calldata transactionLogs
+  ) external view returns (
+    IReceiptProvider.Status status,
+    IReceiptProvider.Log[] memory operationLogs,
+    uint256 gasUsed
+  ) {
+    status = IReceiptProvider.Status.Unknown;
+
+    // TODO: There's no way to know how much gas was used.
+    gasUsed = 0;
+
+    if (operation.entrypoint == GUEST_MODULE_V1) {
+      // TODO: There's no way to know when a guest module transaction starts.
+    } else if (operation.entrypoint == GUEST_MODULE_V2) {
+      // TODO: There's no way to know when a guest module transaction starts.
+    } else {
+      address implementation = abi.decode(operation.endorserCallData, (address));
+
+      if (implementation == MAIN_MODULE_V1 || implementation == MAIN_MODULE_UPGRADABLE_V1) {
+        ExecuteCall memory call = _decodeExecuteCall(operation.data);
+
+        bytes32 digest = keccak256(abi.encode(call.nonce, call.txs));
+        bytes32 subdigest = keccak256(abi.encodePacked("\x19\x01", block.chainid, operation.entrypoint, digest));
+
+        (uint256 space, uint256 nonce) = SubModuleNonce.decodeNonce(call.nonce);
+
+        // Find the first event: a NonceChange from operation.entrypoint with the new nonce.
+        uint256 first;
+        for (first = 0; first < transactionLogs.length; first++) {
+          if (transactionLogs[first].topics.length != 1) {
+            continue;
+          }
+
+          if (transactionLogs[first]._address != operation.entrypoint) {
+            continue;
+          }
+
+          if (transactionLogs[first].topics[0] != NONCE_CHANGE_V1) {
+            continue;
+          }
+
+          // TODO: It would be nice if we had https://github.com/ethereum/solidity/issues/10381.
+          (uint256 _space, uint256 _nonce) = abi.decode(transactionLogs[first].data, (uint256, uint256));
+          if (_space == space && _nonce == nonce + 1) {
+            break;
+          }
+        }
+
+        if (first == transactionLogs.length) {
+          revert("No NonceChange(".c(space).c(", ".s()).c(nonce + 1).c(") event from ".s()).c(operation.entrypoint));
+        }
+
+        // Find the last event: the nth TxExecuted/TxFailed from operation.entrypoint with the correct subdigest.
+        uint256 last;
+        uint256 transactions;
+        for (last = first + 1; last < transactionLogs.length; last++) {
+          if (transactionLogs[last]._address != operation.entrypoint) {
+            continue;
+          }
+
+          if (
+            /* v1 TxExecuted (anonymous) */
+            (transactionLogs[last].topics.length == 0 && transactionLogs[last].data.eq(abi.encode(subdigest))) ||
+            /* v1 TxFailed */
+            (transactionLogs[last].topics.length == 1 && transactionLogs[last].topics[0] == TX_FAILED_V1 && transactionLogs[last].data.slice(0, 32).eq(abi.encode(subdigest)))
+          ) {
+            transactions++;
+            if (transactions == call.txs.length) {
+              status = IReceiptProvider.Status.Succeeded;
+              break;
+            }
+          }
+        }
+
+        if (last == transactionLogs.length) {
+          status = IReceiptProvider.Status.Failed;
+          last--;
+        }
+
+        operationLogs = new IReceiptProvider.Log[](last - first + 1);
+        for (uint256 i = 0; i < operationLogs.length; i++) {
+          operationLogs[i] = transactionLogs[first + i];
+        }
+      } else if (implementation == MAIN_MODULE_V2 || implementation == MAIN_MODULE_UPGRADABLE_V2) {
+        ExecuteCall memory call = _decodeExecuteCall(operation.data);
+
+        bytes32 digest = keccak256(abi.encode(call.nonce, call.txs));
+        bytes32 subdigest = subdigestV2(operation.entrypoint, digest, call.signature);
+
+        (uint256 space, uint256 nonce) = SubModuleNonce.decodeNonce(call.nonce);
+
+        // Find the first event: a NonceChange from operation.entrypoint with the new nonce.
+        uint256 first;
+        for (first = 0; first < transactionLogs.length; first++) {
+          if (transactionLogs[first].topics.length != 1) {
+            continue;
+          }
+
+          if (transactionLogs[first]._address != operation.entrypoint) {
+            continue;
+          }
+
+          if (transactionLogs[first].topics[0] != NONCE_CHANGE_V2) {
+            continue;
+          }
+
+          // TODO: It would be nice if we had https://github.com/ethereum/solidity/issues/10381.
+          (uint256 _space, uint256 _nonce) = abi.decode(transactionLogs[first].data, (uint256, uint256));
+          if (_space == space && _nonce == nonce + 1) {
+            break;
+          }
+        }
+
+        if (first == transactionLogs.length) {
+          revert("No NonceChange(".c(space).c(", ".s()).c(nonce + 1).c(") event from ".s()).c(operation.entrypoint));
+        }
+
+        // Find the last event: the nth TxExecuted/TxFailed from operation.entrypoint with the correct subdigest.
+        uint256 last;
+        uint256 transactions;
+        for (last = first + 1; last < transactionLogs.length; last++) {
+          if (transactionLogs[last]._address != operation.entrypoint) {
+            continue;
+          }
+
+          if (transactionLogs[last].topics.length != 2) {
+            continue;
+          }
+
+          if (transactionLogs[last].topics[0] != TX_EXECUTED_V2 && transactionLogs[last].topics[0] != TX_FAILED_V2) {
+            continue;
+          }
+
+          if (transactionLogs[last].topics[1] != subdigest) {
+            continue;
+          }
+
+          transactions++;
+          if (transactions == call.txs.length) {
+            status = IReceiptProvider.Status.Succeeded;
+            break;
+          }
+        }
+
+        if (last == transactionLogs.length) {
+          status = IReceiptProvider.Status.Failed;
+          last--;
+        }
+
+        operationLogs = new IReceiptProvider.Log[](last - first + 1);
+        for (uint256 i = 0; i < operationLogs.length; i++) {
+          operationLogs[i] = transactionLogs[first + i];
+        }
+      }
+    }
+  }
+
+  function subdigestV2(address _address, bytes32 digest, bytes memory signature) private view returns (bytes32) {
+    bytes1 signatureType = signature[0];
+
+    if (signatureType == LEGACY_TYPE || signatureType == DYNAMIC_TYPE || signatureType == NO_CHAIN_ID_TYPE) {
+      uint256 chainId;
+      if (signatureType != NO_CHAIN_ID_TYPE) {
+        chainId = block.chainid;
+      }
+      return keccak256(abi.encodePacked("\x19\x01", chainId, _address, digest));
+    }
+
+    if (signatureType == CHAINED_TYPE) {
+      uint256 length = signature.slice(1, 3).toUint24();
+      return subdigestV2(_address, digest, signature.slice(4, length));
+    }
+
+    revert("Invalid signature type ".c(signatureType));
+  }
 }
